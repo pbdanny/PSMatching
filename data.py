@@ -3,7 +3,7 @@ import sys
 import os
 
 os.getcwd()
-os.chdir("/home/danny/Downloads")
+os.chdir("./data")
 df = pd.read_parquet("feat.parquet").drop_duplicates()
 df["truprice"] = df[
     [
