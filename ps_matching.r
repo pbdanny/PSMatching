@@ -47,3 +47,17 @@ psm_data[psm_data$subclass == 799, ]
 
 # suppress e+ notation
 options(scipen=999)
+
+#----Code to loop all the split list, run psm matching and append
+# create new dataframes of each test split + combine with all control
+
+combined <- list()
+for (I in seq_along(split_list)) {
+  df_to_match <- rbind(split_list[[I]], df0)
+  psm <- matchit(store_flag ~ feat_cate_ly_sales + feat_ly_sales + feat_cate_ty_sales + feat_aisle_ty_visits + truprice,
+                data = df_to_match)
+  psm_data <- match.data(psm)
+  combined[[I]] <- psm_data
+}
+
+saveRDS(combined, file = "data/combined.RData")
