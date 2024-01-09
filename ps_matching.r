@@ -59,5 +59,22 @@ for (I in seq_along(split_list)) {
   psm_data <- match.data(psm)
   combined[[I]] <- psm_data
 }
-
 saveRDS(combined, file = "data/combined.RData")
+
+# Load list of matched data
+combinded <- readRDS(file = "data/combined.RData")
+
+combinded_salted <- list()
+for (i in seq_along(combinded)) {
+  li <- combinded[[i]]
+  salted <- li %>%
+    mutate(subclass_n = paste0(1, sprintf("%02d", i), subclass)) %>%
+    select(-subclass) %>%
+    rename(subclass = subclass_n)
+  combinded_salted[[i]] <- salted
+}
+
+big_salted <- do.call(rbind, combinded_salted)
+tail(big_salted)
+
+write.csv(big_salted, file = "data/paired.csv")
