@@ -1,35 +1,36 @@
 library(dplyr)
+library(tidyr)
+library(arrow)
 
-df <- read.csv("data/feat.csv")
-summary(df)
-
-df %>%
-  group_by(store_flag) %>%
-  summarise(n())
+#--- Read partitioned parquet
+ds <- open_dataset("data/feat.parquet")
+sc <- Scanner$create(ds)
+at <- sc$ToTable()
+df <- as.data.frame(at) %>%
+  # reverse onehot encoding -> truprice
+  pivot_longer(most_price_driven:price_neutral, names_to = "truprice", values_to = "flag") %>%
+  # rename column with special char
+  rename_with(make.names) %>% 
+  mutate(ty_brand_sales = sum(feat_brand_ty_h1_sum.sales., feat_brand_ty_h2_sum.sales.)) %>%
+  select(-c(flag, feat_brand_ty_h1_sum.sales.:feat_brand_ty_h2_sum.visits., aisle_flag, ty_flag))
 
 # split control
 df0 <- df[df$store_flag == 0, ]
-nrow(df0)
 
 # split treatment into 10 group
 n <- 20
 df1 <- df[df$store_flag == 1, ]
 split_list <- split(df1, factor(sort(rank(row.names(df1)) %% n)))
 
-# create new dataframes of each test split + combine with all control
-for (I in seq_along(split_list)) {
-  assign(paste0("df1_", I), rbind(split_list[[I]], df0))
-}
-
-# Count each split + control
-df1_1 %>%
-  group_by(store_flag) %>%
-  summarise(n())
+# create ps formular from all column name
+ps_formular <- df %>%
+          select(-c(household_id, ty_brand_sales, store_flag)) %>%
+          names() %>%
+          reformulate(, response = "store_flag")
 
 library(MatchIt)
 
-psm <- matchit(store_flag ~ feat_cate_ly_sales + feat_ly_sales + feat_cate_ty_sales + feat_aisle_ty_visits + truprice,
-               data = df1_1)
+psm <- matchit(ps_formular, data = rbind(df0, split_list[[1]]))
 
 summary(psm)
 
