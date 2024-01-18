@@ -1,5 +1,4 @@
 linters: linters_with_defaults(
     line_length_linter = line_length_linter(120L),
-    whitespace_linter = NULL
-) # see vignette("lintr")
+    whitespace_linter = NULL) # see vignette("lintr")
 encoding: "UTF-8"
