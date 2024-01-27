@@ -27,12 +27,35 @@ df <- as.data.frame(at) %>%
 
   select(household_id, group:feat_cate_ty_h2_sum.sales., starts_with("feat_aisle") & ends_with("sum.visits."))
 
-
 # create  formular from all column name
 ps_formular <- df %>%
   select(-c(household_id, ty_brand_sales, store_flag)) %>%
   names() %>%
   reformulate(, response = "store_flag")
+
+#---- A) Test quick match on stratified sample
+small_df <- df %>%
+  group_by(store_flag) %>%
+  slice_sample(prop = 0.0005)
+
+#---- Check unmatched balance
+m_out0 <- matchit(ps_formular, data = small_df, method = NULL, distance = "glm")
+summary(m_out0)
+
+#---- Use matching method = 'quick'
+m_out1 <- matchit(ps_formular, data = small_df, method = "quick", distance = "glm")
+summary(m_out1)
+
+
+
+
+matched_data <- match.data(m_out, data = df)
+saveRDS(matched_data, file = "data/quick.RData")
+matched_data <- readRDS(file = "data/quick.RData")
+
+matched_data %>%
+  group_by(subclass, store_flag) %>%
+  summarise(n = n())
 
 #---- Speed up MatchIt Option 1 : pre-run score
 #step 1 : pre-run score
@@ -41,9 +64,10 @@ df$myfit <- fitted(glm(ps_formular, data = df, family = "binomial"))
 #step 2 : trim data
 trimmed_data <- df %>% select(household_id, myfit, store_flag)
 
+
 #step 3
-m_out <- matchit(store_flag ~ household_id, data = trimmed_data, method = "nearest", distance = trimmed_data$myfit)
-matched_unique_ids_etc <- match.data(m_out, data = trimmed_data)
+m_out <- matchit(store_flag ~ household_id, data = trimmed_data,
+                 method = "quick", distance = trimmed_data$myfit, replace = TRUE)
 matched_unique_ids <- select(matched_unique_ids_etc, household_id)
 matched_data <- matched_unique_ids %>% inner_join(df)
 
@@ -73,7 +97,7 @@ psm_data %>%
 psm_data[psm_data$subclass == 799, ]
 
 # suppress e+ notation
-options(scipen=999)
+options(scipen = 999)
 
 # Code to loop all the split list, run psm matching and append
 # create new dataframes of each test split + combine with all control
@@ -82,7 +106,7 @@ combined <- list()
 for (I in seq_along(split_list)) {
   df_to_match <- rbind(split_list[[I]], df0)
   psm <- matchit(store_flag ~ feat_cate_ly_sales + feat_ly_sales + feat_cate_ty_sales + feat_aisle_ty_visits + truprice,
-                data = df_to_match)
+                 data = df_to_match)
   psm_data <- match.data(psm)
   combined[[I]] <- psm_data
 }
