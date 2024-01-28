@@ -1,65 +1,145 @@
+library(multidplyr)
 library(dplyr)
 library(tidyr)
 library(arrow)
 library(MatchIt)
 
+cluster <- new_cluster(2)
+
 #--- Read partitioned parquet
 ds <- open_dataset("data/feat.parquet")
 sc <- Scanner$create(ds)
 at <- sc$ToTable()
+
 df <- as.data.frame(at) %>%
-  # reverse onehot encoding -> truprice
-  pivot_longer(most_price_driven:price_neutral, names_to = "truprice", values_to = "flag") %>%
+  # reverse one-hot-encoding -> truprice, select truprice_flag == 1
+  pivot_longer(most_price_driven:price_neutral, names_to = "truprice", values_to = "truprice_flag") %>%
+  filter(truprice_flag == 1) %>%
+  # many household_id have mulitiple trupice_flag, dedup by select the first
+  group_by(household_id) %>%
+  mutate(hh_rank = row_number()) %>%
+  filter(hh_rank == 1) %>%
+  # remove unused flag
+  select(-c(truprice_flag, aisle_flag, ty_flag, hh_rank)) %>%
   # rename column with special char
-  rename_with(make.names) %>%
+  rename_with(make.names)
+
+# distributed data to worker , partition by truprice
+df_dist <- df %>%
+  group_by(truprice) %>%
+  partition(cluster) %>%
   mutate(ty_brand_sales = sum(feat_brand_ty_h1_sum.sales., feat_brand_ty_h2_sum.sales.)) %>%
-  select(-c(flag, , aisle_flag, ty_flag)) %>%
-  # select(-c(flag, feat_brand_ty_h1_sum.sales.:feat_brand_ty_h2_sum.visits., aisle_flag, ty_flag))
+  mutate(ly_brand_sales = sum(feat_brand_ly_h1_sum.sales., feat_brand_ly_h2_sum.sales.)) %>%
+  mutate(brand_sales_growth = ty_brand_sales / ly_brand_sales - 1) %>%
   mutate(feat_ly_h1_sum.sales. = sum(pick((starts_with("feat_ly") & ends_with("h1_sum.sales."))))) %>%
   mutate(feat_ly_h2_sum.sales. = sum(pick((starts_with("feat_ly") & ends_with("h2_sum.sales."))))) %>%
   mutate(feat_ty_h1_sum.sales. = sum(pick((starts_with("feat_ty") & ends_with("h1_sum.sales."))))) %>%
   mutate(feat_ty_h2_sum.sales. = sum(pick((starts_with("feat_ty") & ends_with("h2_sum.sales."))))) %>%
-
   mutate(feat_cate_ly_h1_sum.sales. = sum(pick((starts_with("feat_cate_ly") & ends_with("h1_sum.sales."))))) %>%
   mutate(feat_cate_ly_h2_sum.sales. = sum(pick((starts_with("feat_cate_ly") & ends_with("h2_sum.sales."))))) %>%
   mutate(feat_cate_ty_h1_sum.sales. = sum(pick((starts_with("feat_cate_ty") & ends_with("h1_sum.sales."))))) %>%
   mutate(feat_cate_ty_h2_sum.sales. = sum(pick((starts_with("feat_cate_ty") & ends_with("h2_sum.sales."))))) %>%
-
+  mutate(household_id = as.character(household_id)) %>%
   select(household_id, group:feat_cate_ty_h2_sum.sales., starts_with("feat_aisle") & ends_with("sum.visits."))
 
-# create  formular from all column name
+# collect from worker to local
+df <- df_dist %>% collect()
+
+# check uniqueness of household_id
+length(df$household_id)
+length(unique(as.data.frame(sc$ToTable())$household_id))
+
+# Check covariate effect on coefficient of `store_flag`
+logit_before1 <- glm(ty_brand_sales ~ store_flag, data = df)
+summary(logit_before1)
+
+logit_before2 <- glm(ty_brand_sales ~ store_flag + 
+                                          ly_brand_sales + 
+                                          feat_aisle_ty_h1_sum.visits. + feat_aisle_ty_h2_sum.visits. + 
+                                          feat_cate_ty_h1_sum.sales. + feat_cate_ty_h2_sum.sales.
+                                          , data = df)
+summary(logit_before2)
+# With unmatched data, coef. of `store flag` change direction, when more covariate variable put the regression formula
+
+#---- PS matcing : test on tratified sample data
+small_df <- df %>%
+  group_by(store_flag) %>%
+  slice_sample(prop = 0.005)
+
+# create regression formula from all column name excluding
+# hh_id, ty_brand_sales (targetb ariable), store_flag (teat - control flag)
 ps_formular <- df %>%
-  select(-c(household_id, ty_brand_sales, store_flag)) %>%
+  select(-c(household_id, ty_brand_sales, brand_sales_growth, store_flag)) %>%
   names() %>%
   reformulate(, response = "store_flag")
 
-#---- A) Test quick match on stratified sample
-small_df <- df %>%
-  group_by(store_flag) %>%
-  slice_sample(prop = 0.0005)
+# Check unmatched balance - Able to skip, since summary matching have comparison
+# for unmatched data as well
+# m_out0 <- matchit(ps_formular, data = small_df, method = NULL, distance = "glm")
+# summary(m_out0)
 
-#---- Check unmatched balance
-m_out0 <- matchit(ps_formular, data = small_df, method = NULL, distance = "glm")
-summary(m_out0)
-
-#---- Use matching method = 'quick'
-m_out1 <- matchit(ps_formular, data = small_df, method = "quick", distance = "glm")
+#  Use matching method = 'quick'
+m_out1 <- matchit(ps_formular, data = small_df, method = "quick", distance = "glm", link = "logit")
+matched_data <- match.data(m_out1)
 summary(m_out1)
+# Check distribution of PS score : treat should have same range as control
+plot(m_out1, type = "jitter", interactive = FALSE)
+
+# Check covariate balance : standarized mean difference before / after matched
+plot(summary(m_out1))
+
+# Check covriate balance : with density plot
+plot(m_out1, type = "density", interactive = FALSE,
+     which.xs = ~ly_brand_sales + feat_aisle_ty_h1_sum.visits. + feat_aisle_ty_h2_sum.visits.)
+
+# Check covariate effect on coefficient of `store_flag`
+logit_matched1 <- glm(ty_brand_sales ~ store_flag, data = matched_data)
+summary(logit_matched1)
+
+logit_matched2 <- glm(ty_brand_sales ~ store_flag + 
+                                          ly_brand_sales + 
+                                          feat_aisle_ty_h1_sum.visits. + feat_aisle_ty_h2_sum.visits. + 
+                                          feat_cate_ty_h1_sum.sales. + feat_cate_ty_h2_sum.sales.
+                                          , data = matched_data)
+summary(logit_matched2)
+# With matched data, the coef. of `store_flag` stable for any regression formula
+
+# Estimate effect
+t.test(ty_brand_sales ~ store_flag, data = matched_data)
+
+#---- Estimate effect on full data set
+# Can not `summary`, `plot` of full data set
+ps_formular <- df %>%
+  select(-c(household_id, ty_brand_sales, brand_sales_growth, store_flag)) %>%
+  names() %>%
+  reformulate(, response = "store_flag")
+
+#  Use matching method = 'quick'
+m_out2 <- matchit(ps_formular, data = df, method = "quick", distance = "glm", link = "logit")
+matched_data2 <- match.data(m_out2)
+
+summary(m_out2)
+
+# Check covariate effect on coefficient of `store_flag`
+logit_matched1 <- glm(ty_brand_sales ~ store_flag, data = matched_data2)
+summary(logit_matched1)
+
+logit_matched2 <- glm(ty_brand_sales ~ store_flag + 
+                                          ly_brand_sales + 
+                                          feat_aisle_ty_h1_sum.visits. + feat_aisle_ty_h2_sum.visits. + 
+                                          feat_cate_ty_h1_sum.sales. + feat_cate_ty_h2_sum.sales.
+                                          , data = matched_data2)
+summary(logit_matched2)
+# With matched data, the coef. of `store_flag` stable for any regression formula
+
+# Estimate effect
+t.test(ty_brand_sales ~ store_flag, data = matched_data2)
 
 
-
-
-matched_data <- match.data(m_out, data = df)
-saveRDS(matched_data, file = "data/quick.RData")
-matched_data <- readRDS(file = "data/quick.RData")
-
-matched_data %>%
-  group_by(subclass, store_flag) %>%
-  summarise(n = n())
 
 #---- Speed up MatchIt Option 1 : pre-run score
 #step 1 : pre-run score
-df$myfit <- fitted(glm(ps_formular, data = df, family = "binomial"))
+df$myfit <- fitted(glm(ps_formular, data = small_df, family = "binomial"))
 
 #step 2 : trim data
 trimmed_data <- df %>% select(household_id, myfit, store_flag)
