@@ -110,3 +110,16 @@ avg_predictions(fit, variables = "ab_flag",
                 vcov = ~subclass,
                 newdata = subset(matched_data, ab_flag == 1),
                 wts = "weights")
+
+# Estimate effect direct from matched data----
+# Direct calculation equal with t.test regression since t.test estimand mean of group
+matched_data %>%
+  group_by(ab_flag) %>%
+  summarise(mean(epos_units_feat_growth))
+
+matched_data %>%
+  filter(subclass == 22) %>%
+  group_by(ab_flag) %>%
+  summarise(n = n(), tt_weight = sum(weights))
+
+t.test(epos_units_feat_growth ~ ab_flag, data = matched_data)
