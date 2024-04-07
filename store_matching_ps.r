@@ -3,11 +3,27 @@ library(tidyr)
 library(MatchIt)
 library(marginaleffects)
 
-# Load features, pivit, flag test/control----
+# Load features, pivot, flag test/control----
 test_store <- read.csv("./data/store_matching_before_rm_outlier.csv") %>%
   select(test_store_id) %>%
   rename(store_id = test_store_id) %>%
   mutate(ab_flag = 1)
+
+# control store
+reserved_store <- read.csv("data/reserved_store.csv") %>%
+  mutate(ab_flag = 0)
+
+test_reserved_store <- rbind(test_store, reserved_store)
+
+# check dup test / control
+test_control_store %>%
+  group_by(store_id) %>%
+  summarise(n = n()) %>%
+  arrange(desc(n))
+
+test_control_store %>%
+  group_by(ab_flag) %>%
+  summarise(n = n())
 
 # agg at store x period
 period_feat <- read.csv("./data/features_byWk_byStore.csv") %>%
@@ -17,31 +33,50 @@ period_feat <- read.csv("./data/features_byWk_byStore.csv") %>%
 
 head(period_feat)
 
+# Store performance with reserved
+df_flag_reserved <- period_feat %>%
+  pivot_wider(names_from = c(level, period_fis_wk), values_from = c(epos_sales, epos_units, custs), values_fill = 0.0) %>%
+  inner_join(test_control_store, by = join_by("store_id")) %>%
+  # replace_na(list(ab_flag = 0)) %>%
+  mutate(epos_units_feat_growth = epos_units_feat_dur / epos_units_feat_pre - 1)
+
+df_flag_reserved %>%
+  group_by(ab_flag) %>%
+  summarise(n = n()) %>%
+  mutate(prop = prop.table(n))
+
+# Store performanc the rest as control
 df_flag <- period_feat %>%
   pivot_wider(names_from = c(level, period_fis_wk), values_from = c(epos_sales, epos_units, custs), values_fill = 0.0) %>%
-  left_join(test_store, by=join_by("store_id")) %>%
+  left_join(test_store, by = join_by("store_id")) %>%
   replace_na(list(ab_flag = 0)) %>%
   mutate(epos_units_feat_growth = epos_units_feat_dur/epos_units_feat_pre - 1)
 
+df_flag %>%
+  group_by(ab_flag) %>%
+  summarise(n = n()) %>%
+  mutate(prop = prop.table(n))
+
 head(df_flag %>% select(c(store_id, ab_flag)))
 
-df_flag %>% write.csv("./data/features_byWk_byStore_flag.csv", row.names=F)
+df_flag_reserved %>% write.csv("./data/features_byWk_byStore_flag_use_reserved.csv", row.names = FALSE)
+df_flag %>% write.csv("./data/features_byWk_byStore_flag.csv", row.names = FALSE)
 
 # Load prep features----
 df <- read.csv("./data/features_byWk_byStore_flag.csv")
 head(df) %>% select(c(store_id, ab_flag))
 
 # Regression check covariate impact on ab_flag
-logit_before1 <- glm(epos_units_feat_growth ~ ab_flag + 
+logit_before1 <- glm(epos_units_feat_growth ~ ab_flag +
                                            epos_units_cate_exc_feat_dur +
-                                           custs_cate_exc_feat_dur, 
+                                           custs_cate_exc_feat_dur,
                                            data = df)
 summary(logit_before1)
 
-logit_before2 <- glm(epos_units_feat_growth ~ ab_flag + 
-                                           custs_feat_pre + 
+logit_before2 <- glm(epos_units_feat_growth ~ ab_flag +
+                                           custs_feat_pre +
                                            epos_units_cate_exc_feat_pre +
-                                           custs_cate_exc_feat_pre + 
+                                           custs_cate_exc_feat_pre +
                                            epos_units_cate_exc_feat_dur +
                                            custs_cate_exc_feat_dur
                                            , data = df)
@@ -96,12 +131,12 @@ t.test(epos_units_feat_growth ~ ab_flag, data = matched_data)
 # Outcome model : regression target variable with covariates in formula
 var_outcome_model <- colnames(full_matching$X)
 # Recom to have interaction term
-outcome_formula <- paste("epos_units_feat_growth ~ ab_flag * (", paste(var_ps, collapse = "+"), ")")
+outcome_formula <- paste("epos_units_feat_growth ~ ab_flag * (", paste(var_outcome_model, collapse = "+"), ")")
 # MUST have weights
 fit <- glm(outcome_formula, data = matched_data, weights = weights)
-avg_comparisons(fit, variables = "ab_flag", 
-                     vcov = ~subclass, 
-                     newdata = subset(matched_data, ab_flag == 1), 
+avg_comparisons(fit, variables = "ab_flag",
+                     vcov = ~subclass,
+                     newdata = subset(matched_data, ab_flag == 1),
                      wts = "weights")
 # Also g-computation yield no marginal effect on effect measure (epos_unit_growth)
 
@@ -123,3 +158,41 @@ matched_data %>%
   summarise(n = n(), tt_weight = sum(weights))
 
 t.test(epos_units_feat_growth ~ ab_flag, data = matched_data)
+
+# Compare matching between with reserved , rest
+full_match_result <- function(df, df_name, ps_formula) {
+  full_matching <- matchit(ps_formula, data = df, method = "full", distance = "glm", link = "logit")
+  plot(summary(full_matching), main = df_name)
+  matched_data <- match.data(full_matching)
+  var_outcome_model <- colnames(full_matching$X)
+  outcome_formula <- paste("epos_units_feat_growth ~ ab_flag * (", paste(var_outcome_model, collapse = "+"), ")")
+  fit <- glm(outcome_formula, data = matched_data, weights = weights)
+  print(paste("Marginal Effect :", df_name))
+  print(avg_comparisons(fit, variables = "ab_flag",
+                      vcov = ~subclass,
+                      newdata = subset(matched_data, ab_flag == 1),
+                      wts = "weights")
+  )
+  print(
+  avg_predictions(fit, variables = "ab_flag",
+                  vcov = ~subclass,
+                  newdata = subset(matched_data, ab_flag == 1),
+                  wts = "weights")
+  )
+  print("T.test")
+  print(
+    t.test(epos_units_feat_growth ~ ab_flag, data = matched_data)
+  )
+
+  print("Mean difference :")
+  matched_data %>%
+    group_by(ab_flag) %>%
+    summarise(mean(epos_units_feat_growth))
+}
+
+# Use `reserved store`, less matching quality than `rest`
+full_match_result(df_flag, "rest", ps_formula)
+full_match_result(df_flag_reserved, "reserved", ps_formula)
+
+# Result from `marginaleffect` difference from `t.test` or mean difference
+full_match_result(df_flag, "rest", ps_formula)
