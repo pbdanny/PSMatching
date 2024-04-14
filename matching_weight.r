@@ -62,4 +62,5 @@ for (i in 1:5) {
 # If assigned weight to treate = 1 each, control must have weight = 3 then those
 # stratum proportion 2 : 3
 # If stratum have 1 treated, 2 control units the (before scaled) stratum proportion = 1 : 2
-# The control units each mush have weights = (3/2)/2 = 0.75 each  
+# The control units each mush have weights = (3/2)/2 = 0.75 each then the statum weight = 1 : (3/4 + 3/4)
+# 1 : 3/2 -> 2 : 3
