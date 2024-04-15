@@ -1,7 +1,7 @@
 # Based on 
 # https://cran.r-project.org/web/packages/MatchIt/vignettes/estimating-effects.html
 
-# Generate data ----
+# Generate data----
 #Generating data similar to Austin (2009) for demonstrating treatment effect estimation
 gen_X <- function(n) {
   X <- matrix(rnorm(9 * n), nrow = n, ncol = 9)
@@ -92,14 +92,53 @@ avg_comparisons(fit1, variables = "A",
                 vcov = ~subclass,
                 newdata = subset(md, A == 1),
                 wts = "weights")
-                
-avg_predictions(fit1, variables = "A",
+
+mrgn_effct <- avg_predictions(fit1, variables = "A",
                 vcov = ~subclass,
                 newdata = subset(md, A == 1),
                 wts = "weights")
+mrgnl_effct_cntrl <- mrgn_effct$estimate[1]
+mrgnl_effct_treat <- mrgn_effct$estimate[2]
 
+# Compare result with weighted t.test----
+# Reference : https://stackoverflow.com/questions/39646391/independent-sample-t-test-after-weighting
+# Reference : https://cran.r-project.org/web/packages/weights/weights.pdf
+
+library(weights)
+
+x <- subset(md, A == 1)[, "Y_C"]
+y <- subset(md, A == 0)[, "Y_C"]
+w.x <- subset(md, A == 1)[, "weights"]
+w.y <- subset(md, A == 0)[, "weights"]
+
+wtd_t_test <- wtd.t.test(x = x, y = y, weight = w.x, weighty = w.y, samedata = FALSE)
+wtd_mean_treat <- wtd_t_test$additional[["Mean.x"]]
+wtd_mean_cntrl <- wtd_t_test$additional[["Mean.y"]]
+
+# Comparing result with t.test without weighted
+t_test <- t.test(x, y)
+t_test <- t.test(Y_C ~ A, data = md, var.equal = TRUE)
+mean_treat <- t_test$estimate[["mean in group 1"]]
+mean_cntrl <- t_test$estimate[["mean in group 0"]]
+# For any testing method, the treated units have same average, since treated got weight equal to 1 for all units
+# For control, weight have impacts on the results
+cmpr_mean <- data.frame(method = c("marginal effect", "weighted t.test", "t.test"),
+                        mean_treat = c(mrgnl_effct_treat, wtd_mean_treat, mean_treat),
+                        mean_control = c(mrgnl_effct_cntrl, wtd_mean_cntrl, mean_cntrl) )
+
+cmpr_mean
+
+# The result from weighted mean result sum(measure * weights) / sum(weights)
+# equal to wtd.t.test
+
+library(dplyr)
+md %>%
+  mutate(Y_C_w = Y_C * weights) %>%
+  group_by(A) %>%
+  summarise(wt_mean = sum(Y_C_w) / sum(weights))
+
+#For nonlinear outcome models (e.g., logistic regression)----
 #Using either robust or cluster-robust methods to estimate SE and CI.
-#For nonlinear models (e.g., logistic regression)
 
 #Logistic regression model with covariates----
 fit2 <- glm(Y_B ~ A * (X1 + X2 + X3 + X4 + X5 + 
